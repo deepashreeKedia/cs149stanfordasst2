@@ -127,57 +127,165 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 }
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    num_threads_ = num_threads;
+    shutdown_ = false;
+    next_launch_id_ = 0;
+    total_pending_tasks_ = 0;
+    
+    // Create the thread pool
+    for (int i = 0; i < num_threads_; i++) {
+        threads_.push_back(std::thread(&TaskSystemParallelThreadPoolSleeping::workerThread, this));
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
-    //
-    // TODO: CS149 student implementations may decide to perform cleanup
-    // operations (such as thread pool shutdown construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    // Signal all threads to shutdown
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        shutdown_ = true;
+    }
+    
+    // Wake up all sleeping threads so they can exit
+    work_available_cv_.notify_all();
+    
+    // Wait for all threads to finish
+    for (auto& thread : threads_) {
+        thread.join();
+    }
+    
+    // Clean up allocated bulk task launches
+    for (auto& pair : all_launches_) {
+        delete pair.second;
+    }
+}
+
+void TaskSystemParallelThreadPoolSleeping::checkAndEnqueueLaunch(TaskID launch_id) {
+    // Must be called with mutex_ held!
+    BulkTaskLaunch* launch = all_launches_[launch_id];
+    
+    if (launch->dependencies.empty() && !launch->is_ready) {
+        launch->is_ready = true;
+        
+        // Enqueue all tasks from this bulk launch into the ready queue
+        for (int i = 0; i < launch->num_total_tasks; i++) {
+            Task task;
+            task.launch = launch;  // Store pointer instead of ID
+            task.runnable = launch->runnable;
+            task.task_id = i;
+            task.num_total_tasks = launch->num_total_tasks;
+            ready_queue_.push(task);
+        }
+        
+        // Wake up worker threads
+        work_available_cv_.notify_all();
+    }
+}
+
+void TaskSystemParallelThreadPoolSleeping::workerThread() {
+    while (true) {
+        Task task;
+        bool has_task = false;
+        
+        // Wait for work or shutdown signal
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            work_available_cv_.wait(lock, [this]() {
+                return !ready_queue_.empty() || shutdown_;
+            });
+            
+            if (shutdown_) {
+                break;
+            }
+            
+            // Grab a task from the ready queue
+            if (!ready_queue_.empty()) {
+                task = ready_queue_.front();
+                ready_queue_.pop();
+                has_task = true;
+            }
+        }
+        
+        // Execute the task outside the lock
+        if (has_task) {
+            task.runnable->runTask(task.task_id, task.num_total_tasks);
+            
+            // Mark this task as completed
+            BulkTaskLaunch* launch = task.launch;
+            int completed = launch->tasks_completed.fetch_add(1) + 1;
+            
+            // If this bulk launch is complete, update dependencies
+            if (completed == launch->num_total_tasks) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                
+                // Notify all launches that depend on this one
+                for (TaskID dependent_id : launch->dependent_launches) {
+                    BulkTaskLaunch* dependent = all_launches_[dependent_id];
+                    dependent->dependencies.erase(launch->launch_id);
+                    
+                    // If dependent now has no dependencies, it's ready
+                    if (dependent->dependencies.empty() && !dependent->is_ready) {
+                        checkAndEnqueueLaunch(dependent_id);
+                    }
+                }
+                
+                // Decrement total pending tasks
+                int pending = total_pending_tasks_.fetch_sub(launch->num_total_tasks) - launch->num_total_tasks;
+                
+                // If all tasks are done, notify sync()
+                if (pending == 0) {
+                    all_done_cv_.notify_one();
+                }
+            }
+        }
+    }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-
-
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Parts A and B.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
-    }
+    // Implement run() using runAsyncWithDeps() and sync()
+    std::vector<TaskID> no_deps;
+    runAsyncWithDeps(runnable, num_total_tasks, no_deps);
+    sync();
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                                     const std::vector<TaskID>& deps) {
+    std::unique_lock<std::mutex> lock(mutex_);
 
-
-    //
-    // TODO: CS149 students will implement this method in Part B.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // Generate a unique TaskID for this bulk launch
+    TaskID launch_id = next_launch_id_.fetch_add(1);
+    
+    // Create a new BulkTaskLaunch
+    BulkTaskLaunch* launch = new BulkTaskLaunch();
+    launch->launch_id = launch_id;
+    launch->runnable = runnable;
+    launch->num_total_tasks = num_total_tasks;
+    launch->tasks_completed = 0;
+    launch->is_ready = false;
+    
+    // Track dependencies
+    for (TaskID dep_id : deps) {
+        launch->dependencies.insert(dep_id);
+        // Register this launch as a dependent of its dependencies
+        all_launches_[dep_id]->dependent_launches.insert(launch_id);
     }
-
-    return 0;
+    
+    // Store this launch
+    all_launches_[launch_id] = launch;
+    
+    // Increment total pending tasks
+    total_pending_tasks_.fetch_add(num_total_tasks);
+    
+    // Check if this launch is ready to execute (no dependencies)
+    checkAndEnqueueLaunch(launch_id);
+    
+    return launch_id;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
-
-    //
-    // TODO: CS149 students will modify the implementation of this method in Part B.
-    //
-
-    return;
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    // Wait until all pending tasks are completed
+    all_done_cv_.wait(lock, [this]() {
+        return total_pending_tasks_ == 0;
+    });
 }

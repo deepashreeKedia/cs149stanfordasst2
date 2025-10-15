@@ -2,6 +2,11 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <thread>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -34,6 +39,8 @@ class TaskSystemParallelSpawn: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        int num_threads_;
 };
 
 /*
@@ -51,6 +58,22 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        int num_threads_;
+        std::vector<std::thread> threads_;
+        
+        // Task information for current bulk launch
+        IRunnable* current_runnable_;
+        std::atomic<int> next_task_id_;
+        std::atomic<int> num_total_tasks_;
+        std::atomic<int> tasks_completed_;
+        
+        // Control flags
+        std::atomic<bool> shutdown_;
+        std::atomic<bool> has_work_;
+        
+        // Worker thread function
+        void workerThread();
 };
 
 /*
@@ -68,6 +91,27 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        int num_threads_;
+        std::vector<std::thread> threads_;
+        
+        // Task information for current bulk launch
+        IRunnable* current_runnable_;
+        std::atomic<int> next_task_id_;
+        std::atomic<int> num_total_tasks_;
+        std::atomic<int> tasks_completed_;
+        
+        // Control flags
+        std::atomic<bool> shutdown_;
+        std::atomic<bool> has_work_;
+        
+        // Synchronization primitives for sleeping/waking
+        std::mutex mutex_;
+        std::condition_variable work_available_cv_;
+        std::condition_variable work_done_cv_;
+        
+        // Worker thread function
+        void workerThread();
 };
 
 #endif
