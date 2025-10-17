@@ -170,9 +170,9 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
         }
          // After all tasks claimed, wait for work flag to be reset
         // This reduces spinning after work is done
-        while (has_work_.load(std::memory_order_acquire)) {
-            // spin
-        }
+        // while (has_work_.load(std::memory_order_acquire)) {
+        //     // spin
+        // }
     }
 }
 
