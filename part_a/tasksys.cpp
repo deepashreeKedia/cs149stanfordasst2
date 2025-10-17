@@ -157,7 +157,7 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
         // to see all state that was written before has_work_ was set to true
         // So we can read these variables directly without a lock!
         while (true) {
-            int task_id = next_task_id_.fetch_add(1);
+            int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
             
             // Check if all tasks have been claimed
             if (task_id >= num_total_tasks_) {
@@ -166,7 +166,7 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
             
             // Execute the task
             current_runnable_->runTask(task_id, num_total_tasks_);
-            tasks_completed_.fetch_add(1);
+            tasks_completed_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -180,7 +180,6 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
         next_task_id_ = 0;
         tasks_completed_ = 0;
     }
-    // Mutex unlock has implicit release semantics
     
     // Signal workers that work is available
     // Using store() with release ensures workers see all above state
