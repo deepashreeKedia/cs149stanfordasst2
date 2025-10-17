@@ -48,6 +48,22 @@ void TaskSystemSerial::sync() {
  * ================================================================
  */
 
+ static void parallelSpawnWorker(std::atomic<int>* next_task_id, int num_total_tasks, IRunnable* runnable) {
+    // dynamic assignment of tasks to worker threads
+    while (true) {
+        // Atomically fetch the next task Id
+        int task_id = next_task_id->fetch_add(1);
+
+        // check if all tasks already done
+        if (task_id >= num_total_tasks) {
+            break;
+    }
+
+    // execute the task if available
+    runnable->runTask(task_id, num_total_tasks);
+ }
+}
+
 const char* TaskSystemParallelSpawn::name() {
     return "Parallel + Always Spawn";
 }
@@ -60,37 +76,25 @@ TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(n
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
 
 void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
-    // Create a shared atomic counter for dynamic task distribution
+
+    // Create a shared atomic counter for dynamic task distribution; this is atomic so that when a thread is reading 
+    // its task, no other thread can modify the counter / read the same task; since this is dynamic distribution of tasks. 
     std::atomic<int> next_task_id(0);
     
     // Vector to store all worker threads
     std::vector<std::thread> threads;
-    
-    // Lambda function that each thread will execute
-    auto worker = [&]() {
-        while (true) {
-            // Atomically fetch the next task ID
-            int task_id = next_task_id.fetch_add(1);
-            
-            // Check if all tasks are done
-            if (task_id >= num_total_tasks) {
-                break;
-            }
-            
-            // Execute the task
-            runnable->runTask(task_id, num_total_tasks);
-        }
-    };
-    
+
     // Spawn worker threads
+    for (int i=0; i < num_threads_; i++) {
+        threads.push_back(std::thread(parallelSpawnWorker, &next_task_id, num_total_tasks, runnable));
+    }
+
+    // wait for all threads to complete before returning
     for (int i = 0; i < num_threads_; i++) {
-        threads.push_back(std::thread(worker));
+        threads[i].join();
     }
     
-    // Wait for all threads to complete
-    for (auto& thread : threads) {
-        thread.join();
-    }
+    
 }
 
 
@@ -141,18 +145,16 @@ TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
 }
 
 void TaskSystemParallelThreadPoolSpinning::workerThread() {
-    while (true) {
-        // Check if we should shutdown
-        if (shutdown_) {
-            break;
-        }
-        
-        // Spin until there's work (busy-wait)
-        if (!has_work_) {
+    while (!shutdown_) {
+        // Check if there's work available
+        // Using load() with acquire ensures we see all state when has_work_ becomes true
+        if (!has_work_.load(std::memory_order_acquire)) {
             continue;
         }
         
-        // There's work available, try to grab a task
+        // At this point, due to acquire-release synchronization, we're guaranteed
+        // to see all state that was written before has_work_ was set to true
+        // So we can read these variables directly without a lock!
         while (true) {
             int task_id = next_task_id_.fetch_add(1);
             
@@ -163,30 +165,33 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
             
             // Execute the task
             current_runnable_->runTask(task_id, num_total_tasks_);
-            
-            // Mark task as completed
             tasks_completed_.fetch_add(1);
         }
     }
 }
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
-    // Set up the task information for worker threads
-    current_runnable_ = runnable;
-    num_total_tasks_ = num_total_tasks;
-    next_task_id_ = 0;
-    tasks_completed_ = 0;
+    // Lock mutex to set all state atomically
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_runnable_ = runnable;
+        num_total_tasks_ = num_total_tasks;
+        next_task_id_ = 0;
+        tasks_completed_ = 0;
+    }
+    // Mutex unlock has implicit release semantics
     
-    // Signal worker threads that there's work available
-    has_work_ = true;
+    // Signal workers that work is available
+    // Using store() with release ensures workers see all above state
+    has_work_.store(true, std::memory_order_release);
     
     // Spin-wait until all tasks are completed
     while (tasks_completed_ < num_total_tasks) {
         // Busy-wait (spinning)
     }
     
-    // Reset the work flag for the next run() call
-    has_work_ = false;
+    // Signal workers to stop
+    has_work_.store(false, std::memory_order_release);
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -281,17 +286,17 @@ void TaskSystemParallelThreadPoolSleeping::workerThread() {
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-    // Set up the task information for worker threads
-    current_runnable_ = runnable;
-    num_total_tasks_ = num_total_tasks;
-    next_task_id_ = 0;
-    tasks_completed_ = 0;
-    
-    // Signal worker threads that there's work available and wake them up
+    // Set up the task information for worker threads and signal them
+    // All state must be set atomically while holding the lock
     {
         std::unique_lock<std::mutex> lock(mutex_);
+        current_runnable_ = runnable;
+        num_total_tasks_ = num_total_tasks;
+        next_task_id_ = 0;
+        tasks_completed_ = 0;
         has_work_ = true;
     }
+    // Notify must be done after releasing the lock for better performance
     work_available_cv_.notify_all();
     
     // Wait until all tasks are completed

@@ -262,11 +262,18 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     launch->tasks_completed = 0;
     launch->is_ready = false;
     
-    // Track dependencies
+    // Track dependencies - only add dependencies that haven't completed yet
     for (TaskID dep_id : deps) {
-        launch->dependencies.insert(dep_id);
-        // Register this launch as a dependent of its dependencies
-        all_launches_[dep_id]->dependent_launches.insert(launch_id);
+        BulkTaskLaunch* dep_launch = all_launches_[dep_id];
+        
+        // Check if this dependency has already completed
+        if (dep_launch->tasks_completed.load() < dep_launch->num_total_tasks) {
+            // Dependency hasn't completed yet, so track it
+            launch->dependencies.insert(dep_id);
+            // Register this launch as a dependent of its dependencies
+            dep_launch->dependent_launches.insert(launch_id);
+        }
+        // If dependency already completed, don't add it to our dependencies
     }
     
     // Store this launch

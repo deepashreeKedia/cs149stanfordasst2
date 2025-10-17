@@ -72,6 +72,9 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         std::atomic<bool> shutdown_;
         std::atomic<bool> has_work_;
         
+        // Mutex to protect state initialization
+        std::mutex state_mutex_;
+        
         // Worker thread function
         void workerThread();
 };
