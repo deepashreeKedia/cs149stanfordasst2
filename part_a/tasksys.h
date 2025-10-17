@@ -65,7 +65,7 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         // Task information for current bulk launch
         IRunnable* current_runnable_;
         std::atomic<int> next_task_id_;
-        std::atomic<int> num_total_tasks_;
+        int num_total_tasks_;
         std::atomic<int> tasks_completed_;
         
         // Control flags

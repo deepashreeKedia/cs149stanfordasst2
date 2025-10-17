@@ -144,6 +144,7 @@ TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
     }
 }
 
+
 void TaskSystemParallelThreadPoolSpinning::workerThread() {
     while (!shutdown_) {
         // Check if there's work available
