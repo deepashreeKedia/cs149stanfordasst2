@@ -156,8 +156,8 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
         // At this point, due to acquire-release synchronization, we're guaranteed
         // to see all state that was written before has_work_ was set to true
         // So we can read these variables directly without a lock!
-        while (true) {
-            int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
+        int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
+        while (task_id < num_total_tasks_) {
             
             // Check if all tasks have been claimed
             if (task_id >= num_total_tasks_) {
@@ -167,12 +167,9 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
             // Execute the task
             current_runnable_->runTask(task_id, num_total_tasks_);
             tasks_completed_.fetch_add(1, std::memory_order_relaxed);
+            task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
         }
-         // After all tasks claimed, wait for work flag to be reset
-        // This reduces spinning after work is done
-        // while (has_work_.load(std::memory_order_acquire)) {
-        //     // spin
-        // }
+    
     }
 }
 
