@@ -168,6 +168,11 @@ void TaskSystemParallelThreadPoolSpinning::workerThread() {
             current_runnable_->runTask(task_id, num_total_tasks_);
             tasks_completed_.fetch_add(1, std::memory_order_relaxed);
         }
+         // After all tasks claimed, wait for work flag to be reset
+        // This reduces spinning after work is done
+        while (has_work_.load(std::memory_order_acquire)) {
+            // spin
+        }
     }
 }
 
@@ -186,8 +191,8 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     has_work_.store(true, std::memory_order_release);
     
     // Spin-wait until all tasks are completed
-    while (tasks_completed_ < num_total_tasks) {
-        // Busy-wait (spinning)
+    while (tasks_completed_.load(std::memory_order_relaxed) < num_total_tasks_) {
+        // Can use relaxed here since we have proper synchronization elsewhere
     }
     
     // Signal workers to stop
